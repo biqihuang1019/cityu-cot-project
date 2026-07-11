@@ -96,7 +96,7 @@ numba==0.62.1
 numcodecs==0.16.3
 numpy==2.3.3
 openai==2.45.0
-opencv-python==5.0.0.93
+opencv-python-headless==5.0.0.93
 openpyxl==3.1.5
 packaging==25.0
 pandas==2.3.3
