@@ -6,11 +6,10 @@ from skimage.feature import graycomatrix, graycoprops
 from openai import OpenAI
 
 # 假设这是你用上万例数据训练出来的逻辑回归系数（标准化后）
-# 在实际平台中，直接用 joblib.load('your_model.pkl') 加载你训练好的模型
 BETA_DICT = {
-    'Circularity': 1.45,   # 圆形度越低，恶性风险越高（系数为正表示偏离均值的影响）
-    'Solidity': -1.12,    # 凸包度越低，恶性风险越高
-    'GLCM_Contrast': 0.85 # 对比度越高，恶性风险越高
+    'Circularity': 1.45,   # 圆形度
+    'Solidity': -1.12,    # 凸包度
+    'GLCM_Contrast': 0.85 # 对比度
 }
 
 def extract_live_features(img_bytes, mask_bytes):
@@ -42,14 +41,12 @@ def extract_live_features(img_bytes, mask_bytes):
 
 def run_statistical_inference(features):
     """认知推理层：计算条件概率与各指标贡献度"""
-    # 模拟 Z-score 标准化（假设的总体均值和标准差，实际应从大训练集中统计得出）
     z_scores = {
         'Circularity': (features['Circularity'] - 0.55) / 0.15,
         'Solidity': (features['Solidity'] - 0.88) / 0.08,
         'GLCM_Contrast': (features['GLCM_Contrast'] - 2.5) / 1.1
     }
     
-    # 计算 log-odds 和概率: P = 1 / (1 + exp(-wx))
     log_odds = 0.1 # 截距
     contributions = {}
     for k, v in z_scores.items():
@@ -61,20 +58,14 @@ def run_statistical_inference(features):
     return prob_malignant, contributions, z_scores
 
 def generate_llm_cot(features, prob, contributions, api_key=None, base_url=None, model_name="gpt-4o"):
-    """
-    认知触达层：通过真实的 OpenAI 客户端调用大模型生成医学级思考链报告
-    """
-    # 1. 容错质控：如果前端没有传 key，尝试从系统环境变量读取
+    """认知触达层：大模型生成医学级思考链报告"""
     if not api_key:
         api_key = os.environ.get("OPENAI_API_KEY", "your-default-key-here")
     if not base_url:
         base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-    # 2. 初始化标准的 OpenAI 客户端
     client = OpenAI(api_key=api_key, base_url=base_url)
     
-    # 3. 构造极度严密的医疗推理提示词 (Prompt Engineering)
-    # 将你的数学降维结果 (Z-scores/Contributions) 作为严谨的上下文输入
     prompt = f"""
 你是一位世界顶尖的乳腺放射科专家。请根据以下由计算机视觉算法（OpenCV）提取的肿瘤数学特征，以及逻辑回归模型计算出的统计学贡献度，为医生撰写一份结构化的“读图思考链 (CoT) 临床意见书”。
 
@@ -95,21 +86,18 @@ def generate_llm_cot(features, prob, contributions, api_key=None, base_url=None,
 """
 
     try:
-        # 4. 发起网络请求
         response = client.chat.completions.create(
             model=model_name,
             messages=[
                 {"role": "system", "content": "你是一个高度严谨、只基于硬核统计学数据和临床医学事实进行推理的医疗大模型 Agent。"},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2,  # 医疗场景需要极低的随机性，保持推理结论稳定一致
+            temperature=0.2,
             max_tokens=1200
         )
-        # 返回大模型生成的文本报告
         return response.choices[0].message.content
         
     except Exception as e:
-        # 稳健性防御：如果网络超时、欠费或 API Key 报错，返回带有数学指征的保底报告
-        return f"【⚠️ API 接入异常提示】由于网络或鉴权原因未能成功唤醒大模型，以下为您提供纯统计学推理路径：\n" \
+        return f"【⚠️ API 接入异常提示】由于网络或鉴权原因未能成功唤醒大模型，以下为您提供纯统计学推理路径：\n\n" \
                f"该病例的最终预测结论受 [Circularity] 贡献度({contributions.get('Circularity', 0):+.2f}) 与 " \
                f"[Solidity] 贡献度({contributions.get('Solidity', 0):+.2f}) 联合博弈决定。最终收敛恶性概率为 {prob:.2%}。"
