@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import sqlite3
 import io
+import cv2
 from datetime import datetime
 
 # 引入 reportlab 用来动态绘制 PDF
@@ -71,7 +72,28 @@ def build_pdf(patient_id, prob, cot_text):
     buffer.seek(0)
     return buffer.getvalue()
 
-# --- 初始化 Session State（防止点击下载或翻译时组件消失崩溃） ---
+def safe_load_image(uploaded_file):
+    """安全读取上传的文件流，将 16位图像(I;16) 归一化为 8位，并强制用 PNG 编码输出防止前端 JPEG 写入崩溃"""
+    # 1. 读取字节流并在不改变原始位深的情况下解码
+    file_bytes = np.frombuffer(uploaded_file.read(), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_UNCHANGED)
+    
+    # 2. 核心修复：如果读取出来是 16位 灰度图，将其映射回 0-255 的 8位图
+    if img is not None and (img.dtype == np.uint16 or (len(img.shape) == 2 and img.itemsize == 2)):
+        img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    elif img is not None and img.dtype != np.uint8:
+        img = img.astype(np.uint8)
+        
+    # 3. 极其重要：重置文件指针，确保后续的业务推理代码（如 agent 提取特征）依然能够读取文件
+    uploaded_file.seek(0)
+    
+    # 4. 转成对高位深兼容的 PNG 字节流供给 st.image 渲染
+    if img is not None:
+        _, encoded_img = cv2.imencode('.png', img)
+        return encoded_img.tobytes()
+    return None
+
+# --- 初始化 Session State（防止点击下载或浏览器翻译时组件消失触发 removeChild 崩溃） ---
 if "agent_results" not in st.session_state:
     st.session_state.agent_results = None
 
@@ -116,14 +138,28 @@ with col1:
     up_img = st.file_uploader("上传病灶局部图 (Crop Image)", type=['png', 'jpg', 'jpeg'], key="upload_img_file")
     up_mask = st.file_uploader("上传病灶掩膜图 (ROI Mask)", type=['png', 'jpg', 'jpeg'], key="upload_mask_file")
     
-    if up_img: st.image(up_img, caption="原始局部病灶 (Crop)", use_container_width=True)
-    if up_mask: st.image(up_mask, caption="医生标注掩膜 (Mask)", use_container_width=True)
+    # 采用安全预览机制包裹图像渲染
+    if up_img:
+        try:
+            safe_img_bytes = safe_load_image(up_img)
+            if safe_img_bytes:
+                st.image(safe_img_bytes, caption="原始局部病灶 (Crop)", use_container_width=True)
+        except Exception as e:
+            st.error(f"图像预览失败: {e}")
+            
+    if up_mask:
+        try:
+            safe_mask_bytes = safe_load_image(up_mask)
+            if safe_mask_bytes:
+                st.image(safe_mask_bytes, caption="医生标注掩膜 (Mask)", use_container_width=True)
+        except Exception as e:
+            st.error(f"掩膜预览失败: {e}")
 
 with col2:
     st.subheader("🧠 Agent 思考链与诊断报告")
     
     if up_img and up_mask:
-        # 当用户点击按钮时，执行核心算法，并将结果固化在 st.session_state 里
+        # 点击按钮执行计算，并固化结果到状态机
         if st.button("🚀 启动全链路 Agent 推理", type="primary", key="trigger_agent_btn"):
             if not user_api_key:
                 st.warning("⚠️ 提示：您未输入 API Key，系统将使用本地默认模式输出基本统计报告。")
@@ -131,6 +167,11 @@ with col2:
             with st.spinner("Agent 正在计算概率特征路径，并同步唤醒专家大模型..."):
                 img_bytes = up_img.read()
                 mask_bytes = up_mask.read()
+                
+                # 读取后重置，防止按钮重新触发时为空
+                up_img.seek(0)
+                up_mask.seek(0)
+                
                 feats = extract_live_features(img_bytes, mask_bytes)
                 
                 if feats:
@@ -159,7 +200,7 @@ with col2:
                     conn.commit()
                     conn.close()
                     
-                    # 保存结果到 session 状态
+                    # 固化状态
                     st.session_state.agent_results = {
                         "final_decision": final_decision,
                         "confidence": confidence,
@@ -171,7 +212,7 @@ with col2:
                 else:
                     st.error("❌ 图像解析失败，请检查上传的二值图掩膜是否包含有效白色轮廓。")
         
-        # 稳定的渲染区域（独立于 st.button 之外，彻底杜绝 removeChild 报错）
+        # 结果渲染区（脱离了 st.button 的if生命周期，完美规避页面刷新导致的闪退崩溃）
         if st.session_state.agent_results is not None:
             res = st.session_state.agent_results
             st.success(f"诊断成功！最终拟诊：**{res['final_decision']}** (置信度: {res['confidence']:.2%})")
@@ -184,10 +225,10 @@ with col2:
                 data=res['pdf_data'],
                 file_name=f"Agent_CoT_Report_{res['patient_id']}.pdf",
                 mime="application/pdf",
-                key="download_pdf_report_btn" # 赋予固定 key
+                key="download_pdf_report_btn"
             )
     else:
-        # 如果清除图片，同时清空计算结果
+        # 上传文件缺失时清除上一次的遗留状态
         st.session_state.agent_results = None
         st.info("请在左侧侧边栏上传完整的影像和掩膜文件以激活推理 Agent。")
 
@@ -198,7 +239,7 @@ try:
     conn = sqlite3.connect('medical_agent.db')
     history_df = pd.read_sql_query("SELECT id, patient_id, diagnosis, confidence, timestamp FROM records ORDER BY id DESC", conn)
     conn.close()
-    # 为历史数据表格加上唯一 key，防止 React 渲染树冲突
+    # 补全关键 key，防止表格刷新与 DOM 碰撞
     st.dataframe(history_df, use_container_width=True, key="sql_history_table")
 except Exception:
     st.text("暂无历史数据库记录。")
