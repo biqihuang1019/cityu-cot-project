@@ -59,12 +59,27 @@ def run_statistical_inference(features):
 
 def generate_llm_cot(features, prob, contributions, api_key=None, base_url=None, model_name="gpt-4o"):
     """认知触达层：大模型生成医学级思考链报告"""
-    if not api_key:
-        api_key = os.environ.get("OPENAI_API_KEY", "your-default-key-here")
-    if not base_url:
-        base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    
+    # 1. 严格的空值清洗：排除前后空格，只有真正未传参时才读取系统默认环境变量
+    user_key = api_key.strip() if (api_key and str(api_key).strip()) else None
+    user_url = base_url.strip() if (base_url and str(base_url).strip()) else None
+    
+    final_api_key = user_key or os.environ.get("OPENAI_API_KEY", "your-default-key-here")
+    final_base_url = user_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    
+    # 2. 核心兼容性清洗：如果调用 DeepSeek 且使用较新版的 openai 库，尾缀带 /v1 会导致 404
+    # 自动帮用户切掉尾缀的 '/v1' 确保 API 链路高可用
+    if "deepseek" in final_base_url.lower() and final_base_url.endswith("/v1"):
+        final_base_url = final_base_url[:-3]
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    # 3. 未配置 API Key 的本地兜底逻辑
+    if not final_api_key or "default-key" in final_api_key:
+        return f"【💡 本地统计学推理报告】\n由于未配置有效的大模型 API Key，系统自动启用本地统计学兜底。\n\n" \
+               f"该病例的最终预测结论受 [Circularity] 贡献度({contributions.get('Circularity', 0):+.2f}) 与 " \
+               f"[Solidity] 贡献度({contributions.get('Solidity', 0):+.2f}) 联合博弈决定。最终收敛恶性概率为 {prob:.2%}。"
+
+    # 4. 初始化 OpenAI 兼容客户端
+    client = OpenAI(api_key=final_api_key, base_url=final_base_url)
     
     prompt = f"""
 你是一位世界顶尖的乳腺放射科专家。请根据以下由计算机视觉算法（OpenCV）提取的肿瘤数学特征，以及逻辑回归模型计算出的统计学贡献度，为医生撰写一份结构化的“读图思考链 (CoT) 临床意见书”。
@@ -98,6 +113,10 @@ def generate_llm_cot(features, prob, contributions, api_key=None, base_url=None,
         return response.choices[0].message.content
         
     except Exception as e:
-        return f"【⚠️ API 接入异常提示】由于网络或鉴权原因未能成功唤醒大模型，以下为您提供纯统计学推理路径：\n\n" \
-               f"该病例的最终预测结论受 [Circularity] 贡献度({contributions.get('Circularity', 0):+.2f}) 与 " \
-               f"[Solidity] 贡献度({contributions.get('Solidity', 0):+.2f}) 联合博弈决定。最终收敛恶性概率为 {prob:.2%}。"
+        # 将报错细节返回，让前端能够精准感知具体的通信异常（如鉴权、网络、余额不足等）
+        return f"【⚠️ API 接入异常提示】由于网络、余额或鉴权原因未能成功唤醒大模型。\n" \
+               f"错误详情: {str(e)}\n\n" \
+               f"物理链路基本数据：\n" \
+               f"- 请求模型: {model_name}\n" \
+               f"- 请求端点: {final_base_url}\n" \
+               f"- 最终收敛恶性概率: {prob:.2%}"
